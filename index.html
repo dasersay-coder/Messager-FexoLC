@@ -104,4 +104,236 @@
         };
 
         window.searchUser = async function() {
-            const input = document.getElementById('searchInput').value
+            const input = document.getElementById('searchInput').value.trim();
+            if (!input) return alert('Введите @username или ID');
+            
+            const searchNick = input.startsWith('@') ? input.substring(1).toLowerCase() : input.toLowerCase();
+            
+            try {
+                const q = query(collection(db, "users"), where("username", "==", searchNick));
+                let snap = await getDocs(q);
+                
+                if (snap.empty) {
+                    const q2 = query(collection(db, "users"), where("uid", "==", input));
+                    snap = await getDocs(q2);
+                }
+
+                if (snap.empty) return alert('Пользователь не найден!');
+                
+                const userData = snap.docs[0].data();
+                if (userData.username === currentUser.username) return alert('Это вы!');
+                
+                openPrivateChat(userData.username);
+            } catch (e) { alert('Ошибка: ' + e.message); }
+        };
+
+        function loadGlobalMessages() {
+            if (activeChatWith) return;
+            const container = document.getElementById('messagesContainer');
+            document.getElementById('chatTitle').textContent = 'Общий чат';
+            const q = query(collection(db, "messages"), orderBy("timestamp", "asc"));
+            onSnapshot(q, (snapshot) => {
+                container.innerHTML = '';
+                if (snapshot.empty) { container.innerHTML = '<div class="empty-chat">Пока нет сообщений.</div>'; return; }
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const isMe = data.userId === currentUser.id;
+                    const time = data.timestamp ? new Date(data.timestamp.seconds * 1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '';
+                    const msgDiv = document.createElement('div');
+                    msgDiv.className = 'message ' + (isMe ? 'me' : 'other');
+                    msgDiv.innerHTML = `${!isMe ? `<div class="msg-user">@${data.user}</div>` : ''}<div class="msg-text">${data.text}</div><div class="msg-time">${time}</div>`;
+                    container.appendChild(msgDiv);
+                });
+                container.scrollTop = container.scrollHeight;
+            });
+        }
+
+        window.sendGlobalMessage = async function() {
+            const input = document.getElementById('messageInput');
+            const text = input.value.trim();
+            if (!text || !currentUser) return;
+            input.value = '';
+            await addDoc(collection(db, "messages"), {
+                text, user: currentUser.username, userId: currentUser.id, timestamp: serverTimestamp()
+            });
+        };
+
+        window.openPrivateChat = (username) => {
+            if (username === currentUser.username) return;
+            activeChatWith = username;
+            document.getElementById('chatTitle').textContent = 'Чат с @' + username;
+            document.getElementById('globalChat').style.display = 'none';
+            document.getElementById('privateChat').style.display = 'flex';
+            document.getElementById('privateChatTitle').textContent = 'Чат с @' + username;
+            loadPrivateMessages();
+        };
+
+        window.closePrivateChat = () => {
+            activeChatWith = null;
+            document.getElementById('privateChat').style.display = 'none';
+            document.getElementById('globalChat').style.display = 'flex';
+            loadGlobalMessages();
+        };
+
+        function loadPrivateMessages() {
+            if (!activeChatWith) return;
+            const container = document.getElementById('privateMessages');
+            const chatId = [currentUser.username, activeChatWith].sort().join('_');
+            
+            const q = query(collection(db, "private_messages"), where("chatId", "==", chatId), orderBy("timestamp", "asc"));
+            onSnapshot(q, (snapshot) => {
+                container.innerHTML = '';
+                if (snapshot.empty) { container.innerHTML = '<div class="empty-chat">Начните диалог!</div>'; return; }
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const isMe = data.userId === currentUser.id;
+                    const time = data.timestamp ? new Date(data.timestamp.seconds * 1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '';
+                    const msgDiv = document.createElement('div');
+                    msgDiv.className = 'message ' + (isMe ? 'me' : 'other');
+                    msgDiv.innerHTML = `<div class="msg-text">${data.text}</div><div class="msg-time">${time}</div>`;
+                    container.appendChild(msgDiv);
+                });
+                container.scrollTop = container.scrollHeight;
+            });
+        }
+
+        window.sendPrivateMessage = async function() {
+            const input = document.getElementById('privateInput');
+            const text = input.value.trim();
+            if (!text || !currentUser || !activeChatWith) return;
+            input.value = '';
+            
+            const chatId = [currentUser.username, activeChatWith].sort().join('_');
+            await addDoc(collection(db, "private_messages"), {
+                chatId, text, user: currentUser.username, userId: currentUser.id, to: activeChatWith, timestamp: serverTimestamp()
+            });
+        };
+
+        function loadProfile() {
+            document.getElementById('profileUsername').textContent = '@' + currentUser.username;
+            document.getElementById('profileUid').textContent = 'ID: ' + (currentUser.uid || 'Неизвестно');
+            document.getElementById('profileAvatar').textContent = currentUser.username.charAt(0).toUpperCase();
+        }
+
+        window.addEventListener('load', () => {
+            const saved = localStorage.getItem('fexolc_user');
+            if (saved) { currentUser = JSON.parse(saved); enterChat(); }
+            document.getElementById('messageInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendGlobalMessage(); });
+            document.getElementById('privateInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') sendPrivateMessage(); });
+        });
+    </script>
+
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #0a0a1a; height: 100vh; overflow: hidden; color: #fff; }
+        #authScreen { display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .glass-card { background: rgba(255,255,255,0.08); backdrop-filter: blur(20px); border-radius: 20px; padding: 30px; width: 90%; max-width: 400px; text-align: center; border: 1px solid rgba(255,255,255,0.2); }
+        .glass-card input { width: 100%; padding: 15px; margin-bottom: 10px; border-radius: 10px; border: none; background: rgba(255,255,255,0.1); color: #fff; }
+        .glass-btn { width: 100%; padding: 15px; border: none; border-radius: 10px; background: linear-gradient(135deg, #00BFFF, #8A2BE2); color: #fff; font-weight: bold; cursor: pointer; margin-bottom: 10px; }
+        #appScreen { display: none; height: 100vh; flex-direction: column; }
+        .header { background: #1a1a2e; padding: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .main-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+        .tab-content { display: none; height: 100%; flex-direction: column; padding: 10px; overflow-y: auto; }
+        .tab-content.active { display: flex; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .messages { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-bottom: 10px; }
+        .message { max-width: 80%; padding: 10px 15px; border-radius: 15px; font-size: 0.9em; }
+        .message.me { align-self: flex-end; background: #00BFFF; }
+        .message.other { align-self: flex-start; background: #2a2a4a; }
+        .msg-user { font-size: 0.7em; opacity: 0.7; margin-bottom: 4px; }
+        .msg-time { font-size: 0.65em; opacity: 0.6; text-align: right; margin-top: 4px; }
+        .input-area { display: flex; gap: 10px; margin-top: 10px; }
+        .input-area input { flex: 1; padding: 15px; border-radius: 10px; border: none; background: #1a1a2e; color: #fff; }
+        .input-area button { padding: 0 20px; border: none; border-radius: 10px; background: #00BFFF; color: #fff; font-size: 1.2em; }
+        .profile-box { text-align: center; padding: 20px; }
+        .profile-avatar { width: 100px; height: 100px; background: #00BFFF; border-radius: 50%; margin: 0 auto 20px; display: flex; justify-content: center; align-items: center; font-size: 3em; font-weight: bold; }
+        .bottom-nav { display: flex; background: #1a1a2e; border-top: 1px solid #333; }
+        .nav-btn { flex: 1; padding: 15px; background: none; border: none; color: #888; cursor: pointer; font-size: 0.8em; display: flex; flex-direction: column; align-items: center; }
+        .nav-btn.active { color: #00BFFF; }
+        .nav-btn span { font-size: 1.2em; margin-bottom: 5px; }
+    </style>
+</head>
+<body>
+
+    <div id="authScreen">
+        <div class="glass-card">
+            <h1>FexoLC</h1>
+            <div id="loginForm">
+                <input type="text" id="loginUsername" placeholder="@username">
+                <input type="password" id="loginPassword" placeholder="Пароль">
+                <button class="glass-btn" onclick="login()">Войти</button>
+                <button style="background:none; border:none; color:#00BFFF; cursor:pointer;" onclick="showRegister()">Регистрация</button>
+            </div>
+            <div id="registerForm" style="display:none;">
+                <input type="text" id="regUsername" placeholder="@username (без @)">
+                <input type="password" id="regPassword" placeholder="Пароль (мин. 6 символов)">
+                <button class="glass-btn" onclick="register()">Создать аккаунт</button>
+                <button style="background:none; border:none; color:#00BFFF; cursor:pointer;" onclick="showLogin()">Назад</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="appScreen">
+        <div class="header">
+            <h3>FexoLC</h3>
+            <button onclick="logout()" style="background:none; border:none; color:#ff4444;">Выйти</button>
+        </div>
+
+        <div class="main-content">
+            <div id="tab-chats" class="tab-content active">
+                <div id="globalChat" class="chat-area">
+                    <h4 id="chatTitle" style="margin-bottom: 10px;">Общий чат</h4>
+                    <div class="messages" id="messagesContainer"></div>
+                    <div class="input-area">
+                        <input type="text" id="messageInput" placeholder="Сообщение...">
+                        <button onclick="sendGlobalMessage()">➤</button>
+                    </div>
+                </div>
+
+                <div id="privateChat" class="chat-area" style="display: none;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h4 id="privateChatTitle">Личный чат</h4>
+                        <button onclick="closePrivateChat()" style="background: #ff4444; border: none; color: #fff; padding: 5px 10px; border-radius: 5px; cursor: pointer;">Закрыть</button>
+                    </div>
+                    <div class="messages" id="privateMessages"></div>
+                    <div class="input-area">
+                        <input type="text" id="privateInput" placeholder="Личное сообщение...">
+                        <button onclick="sendPrivateMessage()">➤</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="tab-search" class="tab-content">
+                <h2 style="margin-bottom: 15px;">Найти пользователя</h2>
+                <p style="color: #888; margin-bottom: 10px; font-size: 0.9em;">Введите @username или ID аккаунта</p>
+                <div class="input-area" style="margin-bottom: 20px;">
+                    <input type="text" id="searchInput" placeholder="@username или ID">
+                    <button onclick="searchUser()">🔍</button>
+                </div>
+            </div>
+
+            <div id="tab-profile" class="tab-content">
+                <div class="profile-box">
+                    <div class="profile-avatar" id="profileAvatar">F</div>
+                    <h2 id="profileUsername">@user</h2>
+                    <p id="profileUid" style="color: #00BFFF; margin-top: 10px; font-size: 0.9em;">ID: fexolc_xxxxx</p>
+                    <p style="color: #888; margin-top: 10px;">Разработчик FexoLC</p>
+                </div>
+            </div>
+
+            <div id="tab-settings" class="tab-content">
+                <h2>Настройки</h2>
+                <p style="color: #888; margin-top: 20px;">Тут пока пусто.</p>
+            </div>
+        </div>
+
+        <div class="bottom-nav">
+            <button class="nav-btn active" onclick="switchTab('chats')"><span>💬</span>Чаты</button>
+            <button class="nav-btn" onclick="switchTab('search')"><span>🔍</span>Поиск</button>
+            <button class="nav-btn" onclick="switchTab('profile')"><span>👤</span>Профиль</button>
+            <button class="nav-btn" onclick="switchTab('settings')"><span>⚙️</span>Настройки</button>
+        </div>
+    </div>
+
+</body>
+                </html>
