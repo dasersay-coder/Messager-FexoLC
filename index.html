@@ -7,7 +7,10 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, serverTimestamp, where, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { 
+            getFirestore, collection, addDoc, onSnapshot, query, orderBy, 
+            serverTimestamp, where, getDocs, doc, updateDoc 
+        } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyD4xztMw6Lg6hjXBhQmmx7Uu_GNmqEsfAg",
@@ -30,6 +33,22 @@
             return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
         }
 
+        // --- Проверка ключа доступа ---
+        async function checkAccessKey(keyCode) {
+            if (!keyCode) return { valid: false, message: 'Введите ключ доступа!' };
+            const q = query(collection(db, "access_keys"), where("code", "==", keyCode));
+            const snap = await getDocs(q);
+
+            if (snap.empty) return { valid: false, message: 'Неверный ключ доступа!' };
+
+            const keyDoc = snap.docs[0];
+            const keyData = keyDoc.data();
+
+            // Если ключ уже использован (для регистрации)
+            if (keyData.isUsed) return { valid: false, message: 'Этот ключ уже был использован!' };
+            return { valid: true, keyId: keyDoc.id };
+        }
+
         window.showRegister = () => {
             document.getElementById('loginForm').style.display = 'none';
             document.getElementById('registerForm').style.display = 'block';
@@ -39,41 +58,62 @@
             document.getElementById('loginForm').style.display = 'block';
         };
 
+        // --- Регистрация ---
         window.register = async function() {
             const username = document.getElementById('regUsername').value.trim().toLowerCase();
             const password = document.getElementById('regPassword').value.trim();
-            
+            const accessKey = document.getElementById('regAccessKey').value.trim();
+
             if (!username || password.length < 6) return alert('Ник и пароль (мин. 6 символов)!');
-            
+
             try {
+                const keyCheck = await checkAccessKey(accessKey);
+                if (!keyCheck.valid) return alert(keyCheck.message);
+
                 const q = query(collection(db, "users"), where("username", "==", username));
                 if (!(await getDocs(q)).empty) return alert('Ник занят!');
-                
+
                 const randomId = 'fexolc_' + Math.random().toString(36).substring(2, 10);
-                
+
                 await addDoc(collection(db, "users"), {
                     username,
                     password: await hashPassword(password),
                     uid: randomId,
                     createdAt: serverTimestamp()
                 });
+
+                // Помечаем ключ использованным
+                await updateDoc(doc(db, "access_keys", keyCheck.keyId), {
+                    isUsed: true,
+                    usedBy: username
+                });
+
                 alert('Аккаунт создан! Ваш ID: ' + randomId);
                 showLogin();
             } catch (e) { alert('Ошибка: ' + e.message); }
         };
 
+        // --- Вход ---
         window.login = async function() {
             const username = document.getElementById('loginUsername').value.trim().toLowerCase();
             const password = document.getElementById('loginPassword').value.trim();
-            
+            const accessKey = document.getElementById('loginAccessKey').value.trim();
+
+            if (!accessKey) return alert('Введите ключ доступа!');
+
             try {
+                // Для входа проверяем просто существование ключа (вдруг это твой личный ключ)
+                const keyQ = query(collection(db, "access_keys"), where("code", "==", accessKey));
+                const keySnap = await getDocs(keyQ);
+                if (keySnap.empty) return alert('Неверный ключ доступа!');
+
                 const q = query(collection(db, "users"), where("username", "==", username));
                 const snap = await getDocs(q);
                 if (snap.empty) return alert('Пользователь не найден!');
-                
+
                 const userData = snap.docs[0].data();
                 if (userData.password !== await hashPassword(password)) return alert('Неверный пароль!');
-                
+
                 currentUser = { id: snap.docs[0].id, username: userData.username, uid: userData.uid };
                 localStorage.setItem('fexolc_user', JSON.stringify(currentUser));
                 enterChat();
@@ -98,7 +138,7 @@
             document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
             document.getElementById('tab-' + tab).classList.add('active');
             event.currentTarget.classList.add('active');
-            
+
             if (tab === 'chats') loadGlobalMessages();
             if (tab === 'profile') loadProfile();
         };
@@ -106,23 +146,23 @@
         window.searchUser = async function() {
             const input = document.getElementById('searchInput').value.trim();
             if (!input) return alert('Введите @username или ID');
-            
+
             const searchNick = input.startsWith('@') ? input.substring(1).toLowerCase() : input.toLowerCase();
-            
+
             try {
                 const q = query(collection(db, "users"), where("username", "==", searchNick));
                 let snap = await getDocs(q);
-                
+
                 if (snap.empty) {
                     const q2 = query(collection(db, "users"), where("uid", "==", input));
                     snap = await getDocs(q2);
                 }
 
                 if (snap.empty) return alert('Пользователь не найден!');
-                
+
                 const userData = snap.docs[0].data();
                 if (userData.username === currentUser.username) return alert('Это вы!');
-                
+
                 openPrivateChat(userData.username);
             } catch (e) { alert('Ошибка: ' + e.message); }
         };
@@ -132,7 +172,11 @@
             const container = document.getElementById('messagesContainer');
             document.getElementById('chatTitle').textContent = 'Общий чат';
             const q = query(collection(db, "messages"), orderBy("timestamp", "asc"));
-            onSnapshot(q, (snapshot) => {
+            
+            // Отписываемся от старых слушателей, чтобы не дублировать сообщения при переключении вкладок
+            if (window.unsubGlobal) window.unsubGlobal();
+            
+            window.unsubGlobal = onSnapshot(q, (snapshot) => {
                 container.innerHTML = '';
                 if (snapshot.empty) { container.innerHTML = '<div class="empty-chat">Пока нет сообщений.</div>'; return; }
                 snapshot.forEach((doc) => {
@@ -179,9 +223,12 @@
             if (!activeChatWith) return;
             const container = document.getElementById('privateMessages');
             const chatId = [currentUser.username, activeChatWith].sort().join('_');
-            
+
             const q = query(collection(db, "private_messages"), where("chatId", "==", chatId), orderBy("timestamp", "asc"));
-            onSnapshot(q, (snapshot) => {
+            
+            if (window.unsubPrivate) window.unsubPrivate();
+
+            window.unsubPrivate = onSnapshot(q, (snapshot) => {
                 container.innerHTML = '';
                 if (snapshot.empty) { container.innerHTML = '<div class="empty-chat">Начните диалог!</div>'; return; }
                 snapshot.forEach((doc) => {
@@ -202,7 +249,7 @@
             const text = input.value.trim();
             if (!text || !currentUser || !activeChatWith) return;
             input.value = '';
-            
+
             const chatId = [currentUser.username, activeChatWith].sort().join('_');
             await addDoc(collection(db, "private_messages"), {
                 chatId, text, user: currentUser.username, userId: currentUser.id, to: activeChatWith, timestamp: serverTimestamp()
@@ -258,15 +305,21 @@
     <div id="authScreen">
         <div class="glass-card">
             <h1>FexoLC</h1>
+            
+            <!-- ФОРМА ВХОДА -->
             <div id="loginForm">
                 <input type="text" id="loginUsername" placeholder="@username">
                 <input type="password" id="loginPassword" placeholder="Пароль">
+                <input type="text" id="loginAccessKey" placeholder="Ключ доступа">
                 <button class="glass-btn" onclick="login()">Войти</button>
                 <button style="background:none; border:none; color:#00BFFF; cursor:pointer;" onclick="showRegister()">Регистрация</button>
             </div>
+
+            <!-- ФОРМА РЕГИСТРАЦИИ -->
             <div id="registerForm" style="display:none;">
                 <input type="text" id="regUsername" placeholder="@username (без @)">
                 <input type="password" id="regPassword" placeholder="Пароль (мин. 6 символов)">
+                <input type="text" id="regAccessKey" placeholder="Ключ доступа">
                 <button class="glass-btn" onclick="register()">Создать аккаунт</button>
                 <button style="background:none; border:none; color:#00BFFF; cursor:pointer;" onclick="showLogin()">Назад</button>
             </div>
@@ -276,7 +329,7 @@
     <div id="appScreen">
         <div class="header">
             <h3>FexoLC</h3>
-            <button onclick="logout()" style="background:none; border:none; color:#ff4444;">Выйти</button>
+            <button onclick="logout()" style="background:none; border:none; color:#ff4444; cursor:pointer;">Выйти</button>
         </div>
 
         <div class="main-content">
@@ -336,4 +389,4 @@
     </div>
 
 </body>
-                </html>
+                            </html>
